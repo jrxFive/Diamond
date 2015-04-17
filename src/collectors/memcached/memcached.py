@@ -45,14 +45,19 @@ class MemcachedCollector(diamond.collector.Collector):
         'uptime'
     ]
 
+    SLAB_GAUGES = [
+
+    ]
+
     def get_default_config_help(self):
         config_help = super(MemcachedCollector, self).get_default_config_help()
         config_help.update({
-            'publish': "Which rows of 'status' you would like to publish."
-            + " Telnet host port' and type stats and hit enter to see the list"
-            + " of possibilities. Leave unset to publish all.",
-            'hosts': "List of hosts, and ports to collect. Set an alias by "
-            + " prefixing the host:port with alias@",
+            'publish': """Which rows of 'status' you would like to publish.
+                          Telnet host port' and type stats and hit
+                          enter to see the list of possibilities.
+                          Leave unset to publish all.""",
+            'hosts': """List of hosts, and ports to collect. Set an alias by
+                        prefixing the host:port with alias@""",
         })
         return config_help
 
@@ -62,10 +67,11 @@ class MemcachedCollector(diamond.collector.Collector):
         """
         config = super(MemcachedCollector, self).get_default_config()
         config.update({
-            'path':     'memcached',
+            'path': 'memcached',
 
             # Which rows of 'status' you would like to publish.
-            # 'telnet host port' and type stats and hit enter to see the list of
+            # 'telnet host port' and type stats and hit
+            # enter to see the list of
             # possibilities.
             # Leave unset to publish all
             # 'publish': ''
@@ -75,7 +81,7 @@ class MemcachedCollector(diamond.collector.Collector):
         })
         return config
 
-    def get_raw_stats(self, host, port):
+    def get_raw_stats(self, host, port, stats_type="stats"):
         data = ''
         # connect
         try:
@@ -85,14 +91,69 @@ class MemcachedCollector(diamond.collector.Collector):
             else:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.connect((host, int(port)))
+
             # request stats
-            sock.send('stats\n')
+            if stats_type == "stats":
+                sock.send('stats\n')
+            elif stats_type == "slabs":
+                sock.send('stats slabs\n')
+            else:
+                sock.send('stats\n')
+
             # something big enough to get whatever is sent back
             data = sock.recv(4096)
         except socket.error:
             self.log.exception('Failed to get stats from %s:%s',
                                host, port)
         return data
+
+    def get_slabs(self, host, port):
+
+        slab_stats = {}
+        slab_overall_stats = {}
+        SLAB_INDEX = 1
+        SLAB_FIELD = 2
+        SLAB_FIELD_VALUE = 3
+
+        data = self.get_raw_stats(host, port, stats_type="slabs")
+
+        if data:
+            data_slab_lines = data.splitlines()[:-3]
+            data_slab_overall_lines = data.splitlines()[-3:-1]
+
+            for line in data_slab_lines:
+                r = re.match(r'STAT (\d{1,3}):([\w\W]+) ([\.\d]+)', line)
+
+                if r:
+                    if r.group(SLAB_INDEX) not in slab_stats.keys():
+                        slab_stats[r.group(SLAB_INDEX)] = []
+
+                    field_tuple = (r.group(SLAB_FIELD),
+                                   r.group(SLAB_FIELD_VALUE))
+
+                    slab_stats[r.group(SLAB_INDEX)].append(field_tuple)
+
+            for line in data_slab_overall_lines:
+                r = re.match(r'(STAT) ([\w\W]+) ([\d]+)', line)
+
+                if r:
+                    field_tuple = (r.group(SLAB_FIELD),
+                                   r.group(SLAB_FIELD_VALUE))
+
+                    slab_overall_stats[field_tuple[0]] = field_tuple[1]
+
+        return slab_stats, slab_overall_stats
+
+    def publish_overall(self, overall_dict):
+        for key, value in overall_dict.items():
+            publish_key = "slab.{0}".format(key)
+            self.publish(publish_key, value)
+
+    def publish_slabs(self, slab_dict):
+        for key in slab_dict.keys():
+            for field, field_value in slab_dict[key]:
+                publish_key = "slab.{0}.{1}".format(key, field)
+                self.publish(publish_key, field_value)
 
     def get_stats(self, host, port):
         # stuff that's always ignored, aren't 'stats'
@@ -152,6 +213,10 @@ class MemcachedCollector(diamond.collector.Collector):
 
             # figure out what we're configured to get, defaulting to everything
             desired = self.config.get('publish', stats.keys())
+
+            slabs, slabs_overall = self.get_slabs(hostname, port)
+            self.publish_overall(slabs_overall)
+            self.publish_slabs(slabs)
 
             # for everything we want
             for stat in desired:
